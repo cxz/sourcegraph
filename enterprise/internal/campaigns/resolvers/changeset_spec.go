@@ -2,6 +2,8 @@ package resolvers
 
 import (
 	"context"
+	"database/sql"
+	"sync"
 
 	"github.com/graph-gophers/graphql-go"
 	"github.com/graph-gophers/graphql-go/relay"
@@ -9,6 +11,7 @@ import (
 	"github.com/sourcegraph/go-diff/diff"
 
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/graphqlbackend"
+	"github.com/sourcegraph/sourcegraph/cmd/repo-updater/repos"
 	ee "github.com/sourcegraph/sourcegraph/enterprise/internal/campaigns"
 	"github.com/sourcegraph/sourcegraph/internal/campaigns"
 	"github.com/sourcegraph/sourcegraph/internal/db"
@@ -37,6 +40,14 @@ type changesetSpecResolver struct {
 	mappingFetcher *changesetSpecConnectionMappingFetcher
 
 	repo *types.Repo
+
+	planOnce sync.Once
+	plan     *ee.Plan
+	planErr  error
+
+	mappingOnce sync.Once
+	mapping     *ee.RewirerMapping
+	mappingErr  error
 }
 
 func NewChangesetSpecResolver(ctx context.Context, store *ee.Store, cf *httpcli.Factory, changesetSpec *campaigns.ChangesetSpec) (*changesetSpecResolver, error) {
@@ -100,58 +111,110 @@ func (r *changesetSpecResolver) ExpiresAt() *graphqlbackend.DateTime {
 	return &graphqlbackend.DateTime{Time: r.changesetSpec.ExpiresAt()}
 }
 
-func (r *changesetSpecResolver) Operations() ([]campaigns.ReconcilerOperation, error) {
-	return []campaigns.ReconcilerOperation{
-		campaigns.ReconcilerOperationPush,
-		campaigns.ReconcilerOperationUpdate,
-		campaigns.ReconcilerOperationUndraft,
-		campaigns.ReconcilerOperationPublish,
-		campaigns.ReconcilerOperationPublishDraft,
-		campaigns.ReconcilerOperationSync,
-		campaigns.ReconcilerOperationImport,
-		campaigns.ReconcilerOperationClose,
-		campaigns.ReconcilerOperationReopen,
-		campaigns.ReconcilerOperationSleep,
-	}, nil
+func (r *changesetSpecResolver) Operations(ctx context.Context) ([]campaigns.ReconcilerOperation, error) {
+	plan, err := r.computePlan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ops := plan.Ops.ExecutionOrder()
+	return ops, nil
 }
 
-func (r *changesetSpecResolver) Delta() (graphqlbackend.ChangesetSpecDeltaResolver, error) {
-	return &changesetSpecDeltaResolver{}, nil
+func (r *changesetSpecResolver) Delta(ctx context.Context) (graphqlbackend.ChangesetSpecDeltaResolver, error) {
+	plan, err := r.computePlan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if plan.Delta == nil {
+		return &changesetSpecDeltaResolver{}, nil
+	}
+	return &changesetSpecDeltaResolver{delta: *plan.Delta}, nil
 }
 
-func (r *changesetSpecResolver) Changeset(ctx context.Context) (graphqlbackend.ChangesetResolver, error) {
-	if r.mappingFetcher == nil {
+func (r *changesetSpecResolver) computePlan(ctx context.Context) (*ee.Plan, error) {
+	r.planOnce.Do(func() {
+		mapping, err := r.computeMapping(ctx)
+		if err != nil {
+			r.planErr = err
+			return
+		}
 		svc := ee.NewService(r.store, r.httpFactory)
 		campaignSpec, err := r.store.GetCampaignSpec(ctx, ee.GetCampaignSpecOpts{ID: r.changesetSpec.CampaignSpecID})
 		if err != nil {
-			return nil, err
+			r.planErr = err
+			return
+		}
+		campaign, _, err := svc.ReconcileCampaign(ctx, campaignSpec)
+		if err != nil {
+			r.planErr = err
+			return
+		}
+
+		rewirer := ee.NewChangesetRewirer(ee.RewirerMappings{mapping}, campaign, r.store, repos.NewDBStore(r.store.DB(), sql.TxOptions{}))
+		changesets, err := rewirer.Rewire(ctx)
+		if err != nil {
+			r.planErr = err
+			return
+		}
+		if len(changesets) != 1 {
+			r.planErr = errors.New("rewirer did not return changeset")
+			return
+		}
+		changeset := changesets[0]
+
+		var previousSpec *campaigns.ChangesetSpec
+		if changeset.PreviousSpecID != 0 {
+			previousSpec, err = r.store.GetChangesetSpecByID(ctx, changeset.PreviousSpecID)
+		}
+
+		r.plan, r.planErr = ee.DeterminePlan(previousSpec, r.changesetSpec, changeset)
+	})
+	return r.plan, r.planErr
+}
+
+func (r *changesetSpecResolver) computeMapping(ctx context.Context) (*ee.RewirerMapping, error) {
+	r.mappingOnce.Do(func() {
+		if r.mappingFetcher != nil {
+			r.mapping, r.mappingErr = r.mappingFetcher.ForChangesetSpec(ctx, r.changesetSpec.ID)
+			return
+		}
+		svc := ee.NewService(r.store, r.httpFactory)
+		campaignSpec, err := r.store.GetCampaignSpec(ctx, ee.GetCampaignSpecOpts{ID: r.changesetSpec.CampaignSpecID})
+		if err != nil {
+			r.mappingErr = err
+			return
 		}
 		campaign, err := svc.GetCampaignMatchingCampaignSpec(ctx, campaignSpec)
 		var campaignID int64 = 0
 		if err != nil {
-			return nil, err
+			r.mappingErr = err
+			return
 		}
 		if campaign != nil {
 			campaignID = campaign.ID
 		}
 		mappings, err := r.store.GetRewirerMappings(ctx, ee.GetRewirerMappingsOpts{CampaignSpecID: r.changesetSpec.CampaignSpecID, CampaignID: campaignID})
 		if err != nil {
-			return nil, err
+			r.mappingErr = err
+			return
 		}
 		if err := mappings.Hydrate(ctx, r.store); err != nil {
-			return nil, err
+			r.mappingErr = err
+			return
 		}
 		for _, m := range mappings {
 			if m.ChangesetSpecID == r.changesetSpec.ID {
-				if m.Changeset == nil {
-					return nil, nil
-				}
-				return NewChangesetResolver(r.store, r.httpFactory, m.Changeset, r.repo), nil
+				r.mapping = m
+				return
 			}
 		}
-		return nil, errors.New("mapping not found, this should not happen")
-	}
-	mapping, err := r.mappingFetcher.ForChangesetSpec(ctx, r.changesetSpec.ID)
+		r.mappingErr = errors.New("mapping not found, this should not happen")
+	})
+	return r.mapping, r.mappingErr
+}
+
+func (r *changesetSpecResolver) Changeset(ctx context.Context) (graphqlbackend.ChangesetResolver, error) {
+	mapping, err := r.computeMapping(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -305,5 +368,5 @@ func (c *changesetSpecDeltaResolver) AuthorNameChanged() bool {
 	return c.delta.AuthorNameChanged
 }
 func (c *changesetSpecDeltaResolver) AuthorEmailChanged() bool {
-	return c.delta.TitleChanged
+	return c.delta.AuthorEmailChanged
 }
