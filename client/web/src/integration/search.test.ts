@@ -237,7 +237,7 @@ describe('Search', () => {
             await waitAndFocusInput()
             await driver.page.type('.test-query-input', 'test')
             await driver.page.click('.test-case-sensitivity-toggle')
-            await driver.assertWindowLocation('/search?q=test&patternType=literal&case=yes')
+            await driver.assertWindowLocation('/search?patternType=literal&case=yes&q=test')
         })
 
         test('Clicking toggle turns off case sensitivity and removes case= URL parameter', async () => {
@@ -248,7 +248,7 @@ describe('Search', () => {
             await driver.page.waitForSelector('.test-query-input', { visible: true })
             await driver.page.waitForSelector('.test-case-sensitivity-toggle')
             await driver.page.click('.test-case-sensitivity-toggle')
-            await driver.assertWindowLocation('/search?q=test&patternType=literal')
+            await driver.assertWindowLocation('/search?patternType=literal&case=no&q=test')
         })
     })
 
