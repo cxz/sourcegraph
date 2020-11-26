@@ -1020,11 +1020,11 @@ func TestDeterminePlan(t *testing.T) {
 			currentSpec := createChangesetSpec(t, ctx, tx, tc.currentSpec)
 			tc.changeset.currentSpec = currentSpec.ID
 			cs := createChangeset(t, ctx, tx, tc.changeset)
-			plan, err := determinePlan(previousSpec, currentSpec, cs)
+			plan, err := DeterminePlan(previousSpec, currentSpec, cs)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if have, want := plan.ops, tc.wantOperations; !have.Equal(want) {
+			if have, want := plan.Ops, tc.wantOperations; !have.Equal(want) {
 				t.Fatalf("incorrect plan determined, want=%v have=%v", want, have)
 			}
 		})
@@ -1489,7 +1489,7 @@ func TestExecutor_UserCredentialsForGitserver(t *testing.T) {
 	fakeSource := &ct.FakeChangesetSource{Svc: extSvc}
 	sourcer := repos.NewFakeSourcer(nil, fakeSource)
 
-	plan := &plan{}
+	plan := &Plan{}
 	plan.AddOp(campaigns.ReconcilerOperationPush)
 
 	tests := []struct {

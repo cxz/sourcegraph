@@ -83,12 +83,12 @@ func (r *Reconciler) process(ctx context.Context, tx *Store, ch *campaigns.Chang
 		return nil
 	}
 
-	plan, err := determinePlan(prev, curr, ch)
+	plan, err := DeterminePlan(prev, curr, ch)
 	if err != nil {
 		return err
 	}
 
-	log15.Info("Reconciler processing changeset", "changeset", ch.ID, "operations", plan.ops)
+	log15.Info("Reconciler processing changeset", "changeset", ch.ID, "operations", plan.Ops)
 
 	e := &executor{
 		sourcer:           r.Sourcer,
@@ -99,7 +99,7 @@ func (r *Reconciler) process(ctx context.Context, tx *Store, ch *campaigns.Chang
 		ch: ch,
 
 		spec:  curr,
-		delta: plan.delta,
+		delta: plan.Delta,
 	}
 
 	return e.ExecutePlan(ctx, plan)
@@ -139,8 +139,8 @@ type executor struct {
 }
 
 // ExecutePlan executes the given reconciler plan.
-func (e *executor) ExecutePlan(ctx context.Context, plan *plan) (err error) {
-	if plan.ops.IsNone() {
+func (e *executor) ExecutePlan(ctx context.Context, plan *Plan) (err error) {
+	if plan.Ops.IsNone() {
 		return nil
 	}
 
@@ -169,7 +169,7 @@ func (e *executor) ExecutePlan(ctx context.Context, plan *plan) (err error) {
 	}
 
 	upsertChangesetEvents := true
-	for _, op := range plan.ops.ExecutionOrder() {
+	for _, op := range plan.Ops.ExecutionOrder() {
 		switch op {
 		case campaigns.ReconcilerOperationSync:
 			err = e.syncChangeset(ctx)
@@ -700,27 +700,27 @@ func (ops operations) ExecutionOrder() []campaigns.ReconcilerOperation {
 	return uniqueOps
 }
 
-// plan represents the possible operations the reconciler needs to do
+// Plan represents the possible operations the reconciler needs to do
 // to reconcile the current and the desired state of a changeset.
-type plan struct {
+type Plan struct {
 	// The operations that need to be done to reconcile the changeset.
-	ops operations
+	Ops operations
 
-	// The delta between a possible previous ChangesetSpec and the current
+	// The Delta between a possible previous ChangesetSpec and the current
 	// ChangesetSpec.
-	delta *ChangesetSpecDelta
+	Delta *ChangesetSpecDelta
 }
 
-func (p *plan) AddOp(op campaigns.ReconcilerOperation) { p.ops = append(p.ops, op) }
-func (p *plan) SetOp(op campaigns.ReconcilerOperation) { p.ops = operations{op} }
+func (p *Plan) AddOp(op campaigns.ReconcilerOperation) { p.Ops = append(p.Ops, op) }
+func (p *Plan) SetOp(op campaigns.ReconcilerOperation) { p.Ops = operations{op} }
 
-// determinePlan looks at the given changeset to determine what action the
+// DeterminePlan looks at the given changeset to determine what action the
 // reconciler should take.
 // It loads the current ChangesetSpec and if it exists also the previous one.
 // If the current ChangesetSpec is not applied to a campaign, it returns an
 // error.
-func determinePlan(previousSpec, currentSpec *campaigns.ChangesetSpec, ch *campaigns.Changeset) (*plan, error) {
-	pl := &plan{}
+func DeterminePlan(previousSpec, currentSpec *campaigns.ChangesetSpec, ch *campaigns.Changeset) (*Plan, error) {
+	pl := &Plan{}
 
 	// If it doesn't have a spec, it's an imported changeset and we can't do
 	// anything.
@@ -741,7 +741,7 @@ func determinePlan(previousSpec, currentSpec *campaigns.ChangesetSpec, ch *campa
 	if err != nil {
 		return pl, nil
 	}
-	pl.delta = delta
+	pl.Delta = delta
 
 	switch ch.PublicationState {
 	case campaigns.ChangesetPublicationStateUnpublished:
