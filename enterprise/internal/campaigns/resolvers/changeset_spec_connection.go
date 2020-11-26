@@ -2,12 +2,14 @@ package resolvers
 
 import (
 	"context"
+	"database/sql"
 	"strconv"
 	"sync"
 
 	"github.com/pkg/errors"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/graphqlbackend"
 	"github.com/sourcegraph/sourcegraph/cmd/frontend/graphqlbackend/graphqlutil"
+	"github.com/sourcegraph/sourcegraph/cmd/repo-updater/repos"
 	ee "github.com/sourcegraph/sourcegraph/enterprise/internal/campaigns"
 	"github.com/sourcegraph/sourcegraph/internal/api"
 	"github.com/sourcegraph/sourcegraph/internal/campaigns"
@@ -22,8 +24,9 @@ type changesetSpecConnectionResolver struct {
 	store       *ee.Store
 	httpFactory *httpcli.Factory
 
-	opts         ee.ListChangesetSpecsOpts
-	mappingsOpts ee.GetRewirerMappingsOpts
+	opts           ee.ListChangesetSpecsOpts
+	campaignSpecID int64
+	// mappingsOpts ee.GetRewirerMappingsOpts
 
 	// Cache results because they are used by multiple fields
 	once           sync.Once
@@ -64,9 +67,9 @@ func (r *changesetSpecConnectionResolver) Nodes(ctx context.Context) ([]graphqlb
 		return nil, err
 	}
 
-	fetcher := &changesetSpecConnectionMappingFetcher{
-		store: r.store,
-		opts:  r.mappingsOpts,
+	fetcher := &changesetSpecPreviewer{
+		store:          r.store,
+		campaignSpecID: r.campaignSpecID,
 	}
 
 	resolvers := make([]graphqlbackend.ChangesetSpecResolver, 0, len(changesetSpecs))
@@ -98,16 +101,58 @@ func (r *changesetSpecConnectionResolver) compute(ctx context.Context) (campaign
 	return r.changesetSpecs, r.reposByID, r.next, r.err
 }
 
-type changesetSpecConnectionMappingFetcher struct {
-	store *ee.Store
-	opts  ee.GetRewirerMappingsOpts
+type changesetSpecPreviewer struct {
+	store          *ee.Store
+	campaignSpecID int64
 
-	once        sync.Once
+	mappingOnce sync.Once
 	mappingByID map[int64]*ee.RewirerMapping
-	err         error
+	mappingErr  error
+
+	campaignOnce sync.Once
+	campaign     *campaigns.Campaign
+	campaignErr  error
 }
 
-func (c *changesetSpecConnectionMappingFetcher) ForChangesetSpec(ctx context.Context, id int64) (*ee.RewirerMapping, error) {
+func (c *changesetSpecPreviewer) PlanForChangesetSpec(ctx context.Context, changesetSpec *campaigns.ChangesetSpec) (*ee.Plan, error) {
+	mapping, err := c.mappingForChangesetSpec(ctx, changesetSpec.ID)
+	if err != nil {
+		return nil, err
+	}
+	campaign, err := c.computeCampaign(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rewirer := ee.NewChangesetRewirer(ee.RewirerMappings{mapping}, campaign, c.store, repos.NewDBStore(c.store.DB(), sql.TxOptions{}))
+	changesets, err := rewirer.Rewire(ctx)
+	if err != nil {
+		// r.planErr = err
+		return nil, err
+	}
+	if len(changesets) != 1 {
+		// r.planErr =
+		return nil, errors.New("rewirer did not return changeset")
+	}
+	changeset := changesets[0]
+
+	var previousSpec *campaigns.ChangesetSpec
+	if changeset.PreviousSpecID != 0 {
+		previousSpec, err = c.store.GetChangesetSpecByID(ctx, changeset.PreviousSpecID)
+	}
+	// r.plan, r.planErr = ee.DeterminePlan(previousSpec, r.changesetSpec, changeset)
+	return ee.DeterminePlan(previousSpec, changesetSpec, changeset)
+}
+
+// ChangesetForChangesetSpec can return nil
+func (c *changesetSpecPreviewer) ChangesetForChangesetSpec(ctx context.Context, changesetSpecID int64) (*campaigns.Changeset, error) {
+	mapping, err := c.mappingForChangesetSpec(ctx, changesetSpecID)
+	if err != nil {
+		return nil, err
+	}
+	return mapping.Changeset, nil
+}
+
+func (c *changesetSpecPreviewer) mappingForChangesetSpec(ctx context.Context, id int64) (*ee.RewirerMapping, error) {
 	mappingByID, err := c.compute(ctx)
 	if err != nil {
 		return nil, err
@@ -120,15 +165,36 @@ func (c *changesetSpecConnectionMappingFetcher) ForChangesetSpec(ctx context.Con
 	return mapping, nil
 }
 
-func (c *changesetSpecConnectionMappingFetcher) compute(ctx context.Context) (map[int64]*ee.RewirerMapping, error) {
-	c.once.Do(func() {
-		mappings, err := c.store.GetRewirerMappings(ctx, c.opts)
+func (c *changesetSpecPreviewer) computeCampaign(ctx context.Context) (*campaigns.Campaign, error) {
+	c.campaignOnce.Do(func() {
+		svc := ee.NewService(c.store, nil)
+		campaignSpec, err := c.store.GetCampaignSpec(ctx, ee.GetCampaignSpecOpts{ID: c.campaignSpecID})
 		if err != nil {
-			c.err = err
+			c.campaignErr = err
+			return
+		}
+		c.campaign, _, c.campaignErr = svc.ReconcileCampaign(ctx, campaignSpec)
+	})
+	return c.campaign, c.campaignErr
+}
+
+func (c *changesetSpecPreviewer) compute(ctx context.Context) (map[int64]*ee.RewirerMapping, error) {
+	c.mappingOnce.Do(func() {
+		campaign, err := c.computeCampaign(ctx)
+		if err != nil {
+			c.mappingErr = err
+			return
+		}
+		mappings, err := c.store.GetRewirerMappings(ctx, ee.GetRewirerMappingsOpts{
+			CampaignSpecID: c.campaignSpecID,
+			CampaignID:     campaign.ID,
+		})
+		if err != nil {
+			c.mappingErr = err
 			return
 		}
 		if err := mappings.Hydrate(ctx, c.store); err != nil {
-			c.err = err
+			c.mappingErr = err
 			return
 		}
 
@@ -140,5 +206,5 @@ func (c *changesetSpecConnectionMappingFetcher) compute(ctx context.Context) (ma
 			c.mappingByID[m.ChangesetSpecID] = m
 		}
 	})
-	return c.mappingByID, c.err
+	return c.mappingByID, c.mappingErr
 }
