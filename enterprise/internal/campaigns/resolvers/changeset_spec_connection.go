@@ -107,8 +107,8 @@ type changesetSpecConnectionMappingFetcher struct {
 	err         error
 }
 
-func (cscmf *changesetSpecConnectionMappingFetcher) ForChangesetSpec(ctx context.Context, id int64) (*ee.RewirerMapping, error) {
-	mappingByID, err := cscmf.compute(ctx)
+func (c *changesetSpecConnectionMappingFetcher) ForChangesetSpec(ctx context.Context, id int64) (*ee.RewirerMapping, error) {
+	mappingByID, err := c.compute(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -120,25 +120,25 @@ func (cscmf *changesetSpecConnectionMappingFetcher) ForChangesetSpec(ctx context
 	return mapping, nil
 }
 
-func (cscmf *changesetSpecConnectionMappingFetcher) compute(ctx context.Context) (map[int64]*ee.RewirerMapping, error) {
-	cscmf.once.Do(func() {
-		mappings, err := cscmf.store.GetRewirerMappings(ctx, cscmf.opts)
+func (c *changesetSpecConnectionMappingFetcher) compute(ctx context.Context) (map[int64]*ee.RewirerMapping, error) {
+	c.once.Do(func() {
+		mappings, err := c.store.GetRewirerMappings(ctx, c.opts)
 		if err != nil {
-			cscmf.err = err
+			c.err = err
 			return
 		}
-		if err := mappings.Hydrate(ctx, cscmf.store); err != nil {
-			cscmf.err = err
+		if err := mappings.Hydrate(ctx, c.store); err != nil {
+			c.err = err
 			return
 		}
 
-		cscmf.mappingByID = make(map[int64]*ee.RewirerMapping)
+		c.mappingByID = make(map[int64]*ee.RewirerMapping)
 		for _, m := range mappings {
 			if m.ChangesetSpecID == 0 {
 				continue
 			}
-			cscmf.mappingByID[m.ChangesetSpecID] = m
+			c.mappingByID[m.ChangesetSpecID] = m
 		}
 	})
-	return cscmf.mappingByID, cscmf.err
+	return c.mappingByID, c.err
 }

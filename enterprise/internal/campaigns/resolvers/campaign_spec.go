@@ -213,8 +213,7 @@ func (r *campaignSpecResolver) computeCampaign(ctx context.Context) (*campaigns.
 }
 
 func (r *campaignSpecResolver) AppliesToCampaign(ctx context.Context) (graphqlbackend.CampaignResolver, error) {
-	svc := ee.NewService(r.store, r.httpFactory)
-	campaign, err := svc.GetCampaignMatchingCampaignSpec(ctx, r.campaignSpec)
+	campaign, err := r.computeCampaign(ctx)
 	if err != nil {
 		return nil, err
 	}

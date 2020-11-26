@@ -138,18 +138,11 @@ func (r *changesetSpecResolver) computePlan(ctx context.Context) (*ee.Plan, erro
 			r.planErr = err
 			return
 		}
-		svc := ee.NewService(r.store, r.httpFactory)
-		campaignSpec, err := r.store.GetCampaignSpec(ctx, ee.GetCampaignSpecOpts{ID: r.changesetSpec.CampaignSpecID})
+		campaign, err := r.computeCampaign(ctx)
 		if err != nil {
 			r.planErr = err
 			return
 		}
-		campaign, _, err := svc.ReconcileCampaign(ctx, campaignSpec)
-		if err != nil {
-			r.planErr = err
-			return
-		}
-
 		rewirer := ee.NewChangesetRewirer(ee.RewirerMappings{mapping}, campaign, r.store, repos.NewDBStore(r.store.DB(), sql.TxOptions{}))
 		changesets, err := rewirer.Rewire(ctx)
 		if err != nil {
@@ -172,28 +165,33 @@ func (r *changesetSpecResolver) computePlan(ctx context.Context) (*ee.Plan, erro
 	return r.plan, r.planErr
 }
 
+func (r *changesetSpecResolver) computeCampaign(ctx context.Context) (*campaigns.Campaign, error) {
+	svc := ee.NewService(r.store, r.httpFactory)
+	campaignSpec, err := r.store.GetCampaignSpec(ctx, ee.GetCampaignSpecOpts{ID: r.changesetSpec.CampaignSpecID})
+	if err != nil {
+		// r.planErr = err
+		return nil, err
+	}
+	campaign, _, err := svc.ReconcileCampaign(ctx, campaignSpec)
+	if err != nil {
+		// r.planErr = err
+		return nil, err
+	}
+	return campaign, nil
+}
+
 func (r *changesetSpecResolver) computeMapping(ctx context.Context) (*ee.RewirerMapping, error) {
 	r.mappingOnce.Do(func() {
 		if r.mappingFetcher != nil {
 			r.mapping, r.mappingErr = r.mappingFetcher.ForChangesetSpec(ctx, r.changesetSpec.ID)
 			return
 		}
-		svc := ee.NewService(r.store, r.httpFactory)
-		campaignSpec, err := r.store.GetCampaignSpec(ctx, ee.GetCampaignSpecOpts{ID: r.changesetSpec.CampaignSpecID})
+		campaign, err := r.computeCampaign(ctx)
 		if err != nil {
 			r.mappingErr = err
 			return
 		}
-		campaign, err := svc.GetCampaignMatchingCampaignSpec(ctx, campaignSpec)
-		var campaignID int64 = 0
-		if err != nil {
-			r.mappingErr = err
-			return
-		}
-		if campaign != nil {
-			campaignID = campaign.ID
-		}
-		mappings, err := r.store.GetRewirerMappings(ctx, ee.GetRewirerMappingsOpts{CampaignSpecID: r.changesetSpec.CampaignSpecID, CampaignID: campaignID})
+		mappings, err := r.store.GetRewirerMappings(ctx, ee.GetRewirerMappingsOpts{CampaignSpecID: r.changesetSpec.CampaignSpecID, CampaignID: campaign.ID})
 		if err != nil {
 			r.mappingErr = err
 			return
